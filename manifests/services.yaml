@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: vmlab
+spec:
+  selector:
+    tier: web
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: vmlab
+spec:
+  selector:
+    tier: db
+  ports:
+  - name: db
+    port: 5432
+    targetPort: 5432
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: web
+  namespace: vmlab
+spec:
+  to:
+    kind: Service
+    name: web
+  port:
+    targetPort: http

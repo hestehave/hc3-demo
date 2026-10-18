@@ -1,0 +1,14 @@
+# A pod that is NOT part of the app. It must never reach the database.
+# Not in manifests/, so Argo CD neither creates nor prunes it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rogue
+  namespace: vmlab
+  labels:
+    role: rogue
+spec:
+  containers:
+  - name: rogue
+    image: registry.access.redhat.com/ubi9/python-312:latest
+    command: ["sleep", "infinity"]

@@ -1,0 +1,27 @@
+# Pulls the container image onto every node ahead of the demo, so step 4 and the rogue pod start instantly.
+# Apply the day before; delete after the event.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hc3-prepull
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: prepull
+  namespace: hc3-prepull
+spec:
+  selector:
+    matchLabels: {app: prepull}
+  template:
+    metadata:
+      labels: {app: prepull}
+    spec:
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: python
+        image: registry.access.redhat.com/ubi9/python-312:latest
+        command: ["sleep", "infinity"]
+        resources:
+          requests: {cpu: 1m, memory: 8Mi}
