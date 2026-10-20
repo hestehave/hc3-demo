@@ -59,7 +59,7 @@ start_probe() {
   oc exec rogue -n "$NS" -- bash -c 'for i in $(seq 1 600); do
       if timeout 0.3 bash -c "</dev/tcp/db/5432" 2>/dev/null; then echo OPEN; else echo blocked; fi; sleep 0.2; done' \
     >> "$PROBE_LOG" 2>/dev/null &
-  PROBE_PID=$!; }
+  PROBE_PID=$!; disown "$PROBE_PID" 2>/dev/null; }
 stop_probe() { [ -n "${PROBE_PID:-}" ] && kill "$PROBE_PID" 2>/dev/null; PROBE_PID=; return 0; }
 trap 'stop_probe; rm -f "$PROBE_LOG"' EXIT
 
