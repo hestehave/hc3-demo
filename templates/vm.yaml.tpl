@@ -46,6 +46,7 @@ spec:
       - name: default
         pod: {}
 __PROBES__
+__AFFINITY__
       volumes:
       - name: rootdisk
         dataVolume:
