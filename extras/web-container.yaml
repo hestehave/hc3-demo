@@ -1,4 +1,4 @@
-# Step 4 of the demo: copy this file into manifests/ and push.
+# Step 5 of breakit.sh: copied into manifests/, then committed and pushed. ./breakit.sh reset removes it again.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
