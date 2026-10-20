@@ -8,7 +8,7 @@ spec:
   policyTypes: [Ingress]
 ---
 # The ingress router. On bare metal it runs on the host network, so both groups are allowed.
-# Second rule: SSH from the nodes, needed by virtctl ssh (demo step 4).
+# Second rule: SSH from virt-handler, needed by virtctl ssh (demo step 4).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -30,8 +30,11 @@ spec:
     ports:
     - protocol: TCP
       port: 8080
-  # virtctl ssh / port-forward: virt-handler connects from the node, so allow SSH from the host network only
+  # virtctl ssh / port-forward: the connection comes from virt-handler (openshift-cnv), so allow SSH from there only
   - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: openshift-cnv
     - namespaceSelector:
         matchLabels:
           policy-group.network.openshift.io/host-network: ""
