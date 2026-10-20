@@ -90,8 +90,8 @@ watch_firewall() {   # until the rule has been opened and Argo CD has put it bac
   stop_probe; echo "${C_WARN}  Not healed after 2 minutes: open Argo CD and press Refresh.${C_OFF}"
 }
 
-watch_traffic() {    # $1 = seconds, $2 = stop when this VM answers again (optional)
-  local max="$1" want="${2:-}" start now ans vms gone=0
+watch_traffic() {    # $1 = seconds, $2 = stop when this answers again (optional), $3 = message when it does
+  local max="$1" want="${2:-}" done_msg="${3:-${2:-} is back in the pool.}" start now ans vms gone=0
   start=$(date +%s)
   echo "${C_NOTE}  (live: who answers the load balancer, and the state of the web VMs; any key to stop)${C_OFF}"
   while :; do
@@ -102,7 +102,7 @@ watch_traffic() {    # $1 = seconds, $2 = stop when this VM answers again (optio
     # finished only after the VM has first dropped out (not ready or gone) and then answers again
     if [ -n "$want" ] && ! echo "$vms" | grep -q "$want:ready"; then gone=1; fi
     if [ -n "$want" ] && [ $gone = 1 ] && echo "$ans" | grep -q "$want"; then
-      echo "${C_OK}  $want is back in the pool.${C_OFF}"; return 0; fi
+      echo "${C_OK}  $done_msg${C_OFF}"; return 0; fi
     pause_or_key 1 && return 0
   done
 }
@@ -134,7 +134,8 @@ step() {  # step <description> <command>
   printf '%s\n' "$C_OFF"
   eval "$c"
 }
-live() { on || return 0; eval "$1"; }   # untyped live view right after a step
+live() { on || return 0; eval "$1"; }
+wait_for() { on || return 0; printf '\n%s\n' "${C_WARN}  >> $1  (any key when done)${C_OFF}"; key; }   # untyped live view right after a step
 
 # ---------------- check / reset ----------------
 ok()  { echo "  ${C_OK}OK${C_OFF}    $1"; }
@@ -157,6 +158,9 @@ if [ "${1:-}" = check ]; then
   else bad "rogue pod missing or not running: oc apply -f ops/rogue.yaml"; fi
   [ "$(db_rule)" = web ] && ok "database rule allows tier=web only" || bad "database rule is '$(db_rule)': Argo CD should heal it; check the app"
   [ "$(rogue_db)" = blocked ] && ok "rogue -> db is blocked" || bad "rogue can reach db: Argo CD should heal it; check the app"
+  if [ -f manifests/web-container.yaml ] || oc get deployment web-container -n "$NS" >/dev/null 2>&1; then
+    bad "the container from step 5 is still there: ./breakit.sh reset, then commit and push in GitHub Desktop"
+  else ok "no container in the pool yet (step 5 adds it)"; fi
   np=$(oc get networkpolicy -n "$NS" --no-headers 2>/dev/null | wc -l | tr -d ' '); [ "$np" = 3 ] && ok "3 network policies" || bad "$np network policies (expected 3)"
   if [ ! -f "$KEY" ]; then bad "SSH key $KEY missing (step 4 needs it)"
   elif limit 25 "virtctl ssh fedora@vmi/web2 -n $NS -i $KEY $SSH_OPTS --local-ssh-opts=-oConnectTimeout=10 --local-ssh-opts=-oBatchMode=yes -c 'systemctl is-active webdemo; timeout 2 bash -c \"</dev/tcp/db/5432\" && echo db-reachable'" 2>/dev/null </dev/null > "$PROBE_LOG"; grep -q '^active' "$PROBE_LOG"; then
@@ -174,10 +178,16 @@ if [ "${1:-}" = reset ]; then
     r=$(oc get vmi "$vm" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
     [ "$r" = True ] || { echo "  restarting $vm"; virtctl restart "$vm" -n "$NS" >/dev/null 2>&1 || true; }
   done
+  if [ -f manifests/web-container.yaml ]; then
+    rm manifests/web-container.yaml
+    echo "  removed manifests/web-container.yaml"
+    echo "  ${C_WARN}Now commit and push in GitHub Desktop (summary: Remove the container), then run:${C_OFF}"
+    echo "    oc annotate application vmlab -n openshift-gitops argocd.argoproj.io/refresh=hard --overwrite"
+  fi
   echo "Wait about 6 minutes, then run: ./breakit.sh check"
   exit 0
 fi
-case "$START" in [1-4]) ;; *) echo "usage: ./breakit.sh [check | reset | <step 1-4>]"; exit 1;; esac
+case "$START" in [1-5]) ;; *) echo "usage: ./breakit.sh [check | reset | <step 1-5>]"; exit 1;; esac
 
 # =====================================================================
 #  The demo
@@ -218,5 +228,19 @@ step "Log in to web2 and stop its web server." \
      "virtctl ssh fedora@vmi/web2 -n $NS -i $KEY $SSH_OPTS -c 'sudo systemctl stop webdemo && echo webdemo stopped on \$(hostname)'"
 live "watch_traffic 240 'web2'"
 say "Readiness took it out of the load balancer, liveness restarted the VM. No ticket, no page."
+
+chapter 5 "Add a container to the pool" \
+  "Same app, new web server: this time a container, not a VM. One file in Git, no new load balancer, no new firewall rule."
+step "Add one file: a container labelled tier: web, the same label the web VMs carry." \
+     "cp extras/web-container.yaml manifests/ && sed -n '/template:/,/containers:/p' manifests/web-container.yaml"
+wait_for "Switch to GitHub Desktop: commit 'Add a container to the web pool' and Push origin"
+step "Tell Argo CD to look at Git now, instead of on its next poll." \
+     "oc annotate application vmlab -n openshift-gitops argocd.argoproj.io/refresh=hard --overwrite"
+live "watch_traffic 180 'web-container' 'The container is in the pool, next to the VMs.'"
+step "One pool: three VMs and a container, selected by the same label." \
+     "oc get pods -n $NS -l tier=web -L kind -o wide"
+step "The load balancer now answers from VMs and the container in turn." \
+     "for i in 1 2 3 4 5 6 7 8; do curl -s $URL; sleep 0.5; done"
+say "Same Service, same firewall rule, same Git workflow. A VM or a container is just a different kind of member."
 
 on && { printf '\n%s' "${C_NOTE}  ── end of demo (any key) ──${C_OFF}"; key; echo; echo; echo "${C_HEAD}  Done · back to the slides  ${C_OFF}"; }
