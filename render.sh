@@ -16,7 +16,7 @@ WEB_PROBES='      readinessProbe:
         failureThreshold: 2
       livenessProbe:
         httpGet: {port: 8080, path: /}
-        initialDelaySeconds: 120
+        initialDelaySeconds: 300
         periodSeconds: 10
         failureThreshold: 3'
 
