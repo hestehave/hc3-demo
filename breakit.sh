@@ -43,27 +43,51 @@ webvms()   { oc get vmi -n "$NS" -l tier=web --no-headers \
                -o custom-columns='N:.metadata.name,P:.status.phase,R:.status.conditions[?(@.type=="Ready")].status,NODE:.status.nodeName' 2>/dev/null \
              | awk '{printf "%s:%s%s ", $1, ($3=="True"?"ready":"NOT-READY"), ($4!=""?"@"$4:"")}'; }
 
+# Run a command for at most $1 seconds (macOS has no 'timeout'); kills the whole process group
+limit() { local s="$1"; shift
+  perl -e '$SIG{ALRM}=sub{kill "TERM",-$$; exit 124}; setpgrp(0,0); alarm shift; system(@ARGV); exit($?>>8)' "$s" bash -c "$*"; }
+
 # Wait up to $1 whole seconds (bash 3.2), return 0 at once on a key press
 pause_or_key() { local k; IFS= read -rsn1 -t "$1" k </dev/tty && return 0 || return 1; }
 
 # ---------------- live views (run until done, or a key press) ----------------
+# A connection test that runs inside the rogue pod 3-5 times a second, in the background,
+# so even a hole that is open for only a few seconds is caught. Started before the change.
+PROBE_LOG="$(mktemp -t breakit.XXXXXX)"; PROBE_PID=
+start_probe() {
+  stop_probe; : > "$PROBE_LOG"
+  oc exec rogue -n "$NS" -- bash -c 'for i in $(seq 1 600); do
+      if timeout 0.3 bash -c "</dev/tcp/db/5432" 2>/dev/null; then echo OPEN; else echo blocked; fi; sleep 0.2; done' \
+    >> "$PROBE_LOG" 2>/dev/null &
+  PROBE_PID=$!; }
+stop_probe() { [ -n "${PROBE_PID:-}" ] && kill "$PROBE_PID" 2>/dev/null; PROBE_PID=; return 0; }
+trap 'stop_probe; rm -f "$PROBE_LOG"' EXIT
+
 watch_firewall() {   # until the rule has been opened and Argo CD has put it back
-  local seen_open=0 i rule r rt ct
+  local seen_any=0 seen_open=0 i rule rt ct last=0 total chunk
+  [ -z "${PROBE_PID:-}" ] && start_probe
   echo "${C_NOTE}  (live: what the database rule allows, and whether the rogue pod gets in; any key to stop)${C_OFF}"
-  for i in $(seq 1 90); do
-    rule=$(db_rule); r=$(rogue_db)
+  for i in $(seq 1 120); do
+    rule=$(db_rule)
+    total=$(wc -l < "$PROBE_LOG" | tr -d ' ')
+    chunk=$(sed -n "$((last + 1)),${total}p" "$PROBE_LOG"); last=$total
     case "$rule" in
-      ANY) seen_open=1; rt="${C_BAD}ANY pod    ${C_OFF}";;
+      ANY) seen_any=1; rt="${C_BAD}ANY pod    ${C_OFF}";;
       web) rt="${C_OK}tier=web   ${C_OFF}";;
       *)   rt="${C_WARN}?          ${C_OFF}";;
     esac
-    if [ "$r" = OPEN ]; then seen_open=1; ct="${C_BAD}OPEN  <<< EXPOSED${C_OFF}"; else ct="${C_OK}blocked${C_OFF}"; fi
+    if echo "$chunk" | grep -q OPEN; then seen_open=1; ct="${C_BAD}OPEN  <<< EXPOSED${C_OFF}"
+    elif [ -z "$chunk" ]; then ct="${C_NOTE}...${C_OFF}"
+    else ct="${C_OK}blocked${C_OFF}"; fi
     echo "  $(date +%T)  rule allows: $rt  rogue -> db:5432  $ct"
-    if [ $seen_open = 1 ] && [ "$rule" = web ] && [ "$r" = blocked ]; then
-      echo "${C_OK}  Healed: Argo CD put the rule back the way Git says.${C_OFF}"; return 0; fi
-    pause_or_key 1 && return 0
+    if [ $seen_any = 1 ] && [ "$rule" = web ] && [ -n "$chunk" ] && ! echo "$chunk" | grep -q OPEN; then
+      stop_probe
+      if [ $seen_open = 1 ]; then echo "${C_OK}  Healed: Argo CD put the rule back the way Git says, and the hole is closed.${C_OFF}"
+      else echo "${C_OK}  Healed: Argo CD put the rule back before a single connection got through.${C_OFF}"; fi
+      return 0; fi
+    pause_or_key 1 && { stop_probe; return 0; }
   done
-  echo "${C_WARN}  Not healed after 90 s: open Argo CD and press Refresh.${C_OFF}"
+  stop_probe; echo "${C_WARN}  Not healed after 2 minutes: open Argo CD and press Refresh.${C_OFF}"
 }
 
 watch_traffic() {    # $1 = seconds, $2 = stop when this VM answers again (optional)
@@ -135,9 +159,11 @@ if [ "${1:-}" = check ]; then
   [ "$(rogue_db)" = blocked ] && ok "rogue -> db is blocked" || bad "rogue can reach db: Argo CD should heal it; check the app"
   np=$(oc get networkpolicy -n "$NS" --no-headers 2>/dev/null | wc -l | tr -d ' '); [ "$np" = 3 ] && ok "3 network policies" || bad "$np network policies (expected 3)"
   if [ ! -f "$KEY" ]; then bad "SSH key $KEY missing (step 4 needs it)"
-  elif eval "virtctl ssh fedora@vmi/web2 -n $NS -i $KEY $SSH_OPTS --local-ssh-opts=-oConnectTimeout=10 -c 'systemctl is-active webdemo'" 2>/dev/null | grep -q '^active'; then
+  elif limit 25 "virtctl ssh fedora@vmi/web2 -n $NS -i $KEY $SSH_OPTS --local-ssh-opts=-oConnectTimeout=10 --local-ssh-opts=-oBatchMode=yes -c 'systemctl is-active webdemo; timeout 2 bash -c \"</dev/tcp/db/5432\" && echo db-reachable'" 2>/dev/null </dev/null > "$PROBE_LOG"; grep -q '^active' "$PROBE_LOG"; then
     ok "SSH into web2 works, web server active"
-  else bad "SSH into web2 failed (step 4 needs it): virtctl ssh fedora@vmi/web2 -n $NS -i $KEY"; fi
+    grep -q db-reachable "$PROBE_LOG" && ok "web2 -> db:5432 works (the database listens; only the firewall stops rogue)" \
+      || bad "web2 can't reach db:5432: is the db VM's listener running? virtctl ssh fedora@vmi/db -n $NS -i $KEY -c 'systemctl is-active webdemo'"
+  else bad "SSH into web2 failed or hung after 25 s (step 4 needs it; press s to skip step 4)"; fi
   echo; [ $FAIL = 0 ] && echo "${C_OK}All green. Run: ./breakit.sh${C_OFF}" || echo "${C_WARN}Fix the FIX lines, then run check again.${C_OFF}"
   exit $FAIL
 fi
@@ -169,6 +195,7 @@ step "A pod that is not part of the app tries the database port. It must be bloc
 
 chapter 2 "Someone opens the firewall" \
   "It's 2 a.m., someone is troubleshooting, and they open the database rule to every pod."
+live "start_probe"
 step "Open the database rule to every pod, by hand, then watch." \
      "oc patch networkpolicy web-to-db -n $NS --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/ingress/0/from\",\"value\":[{\"podSelector\":{}}]}]'"
 live "watch_firewall"
