@@ -17,7 +17,7 @@ set -uo pipefail
 cd "$(dirname "$0")"
 
 NS=vmlab
-APPS_DOMAIN=apps.cluster-5cz6g.dyn.redhatworkshops.io
+APPS_DOMAIN=apps.cluster-zxwhk.dyn.redhatworkshops.io
 URL="http://web-${NS}.${APPS_DOMAIN}/"
 KEY="${HC3_KEY:-$HOME/.ssh/hc3demo}"
 TYPE_DELAY="${TYPE_DELAY:-0.03}"
